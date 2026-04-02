@@ -25,6 +25,14 @@ var CONFIG = {
   exportEnabled: false
 };
 
+/**
+ * Metric configuration used to standardize data loading and preprocessing.
+ * Each metric defines:
+ * - collection: source ImageCollection
+ * - band: output band name used downstream
+ * - scaleFactor: applied to raw imagery
+ * - viz: map visualization parameters
+ */
 var METRICS = {
   NDVI: {
     label: 'Normalized Difference Vegetation Index',
@@ -73,6 +81,11 @@ var METRICS = {
   }
 };
 /* ------------------------------- DATA ------------------------------------ */
+/**
+ * Load and merge restoration project boundaries from all regional assets.
+ * The merged FeatureCollection is sorted by country for UI dropdown display.
+ * @returns {ee.FeatureCollection}
+ */
 function loadProjects() {
   return ee.FeatureCollection(CONFIG.assets.africa)
     .merge(ee.FeatureCollection(CONFIG.assets.asia))
@@ -258,11 +271,22 @@ function populateLegend(legend_name, viz_params, add_char_min, add_char_max, opt
         
 var legend = makeLegend("Legend", classification_palette, classification_names, 2)
 
-
+/**
+ * Clip an image to the supplied analysis geometry.
+ * Used to limit calculations and map display to the selected project/control area.
+ * @param {ee.Image} image
+ * @param {ee.Geometry|ee.FeatureCollection} geometry
+ * @returns {ee.Image}
+ */
 function clipToGeometry(image, geometry) {
   return image.clip(geometry);
 }
-
+/**
+ * Create a binary non-water mask using JRC Global Surface Water.
+ * Pixels classified as permanent/max water extent are removed from analysis.
+ * @param {ee.Geometry|ee.FeatureCollection} geometry
+ * @returns {ee.Image}
+ */
 function getNonWaterMask(geometry) {
   return ee.Image('JRC/GSW1_2/GlobalSurfaceWater')
     .clip(geometry)
@@ -275,38 +299,6 @@ function applyNonWaterMask(image, geometry) {
 }
 
 
-/**
- * Extract project metadata 
- * @param {ee.Feature} projectFeature - Single project feature.
- * @returns {object} Metadata with name, startDate, endDate, monitoringStart.
- */
-
-function getProjectMetadata(projectFeature) {
-  // Create a temporary collection with one feature
-  var tempColl = ee.FeatureCollection([projectFeature]);
-
-  // Try primary property names, fall back to alternate if needed
-  var startDates = extractDates(tempColl, 'Project_St');
-  startDates = ee.Algorithms.If(startDates.size(), startDates, extractDates(tempColl, 'Project St'));
-  var endDates = extractDates(tempColl, 'Project_En');
-  endDates = ee.Algorithms.If(endDates.size(), endDates, extractDates(tempColl, 'Project En'));
-
-  // Convert the first (only) value to ee.Date
-  var startDate = ee.Date(convertToDateFormat(ee.List(startDates).get(0)));
-  var endDate = ee.Date(convertToDateFormat(ee.List(endDates).get(0)));
-
-  // Project name
-  var name = projectFeature.get('Project_Na');
-  name = ee.Algorithms.If(name, name, projectFeature.get('Project Na'));
-  name = ee.Algorithms.If(name, name, 'Unknown project');
-
-  return {
-    name: name,
-    startDate: startDate,
-    endDate: endDate,
-    monitoringStart: startDate.advance(-3, 'year')
-  };
-}
 
 // Function to parse date string to readable format
 var formatDate = function(dateString) {
@@ -330,7 +322,14 @@ function parseDate(dateString) {
     null
   );
 }
-
+/**
+ * Build a cumulative anomaly/difference series from a time-ordered ImageCollection.
+ * Assumes the collection is already sorted by 'system:time_start'.
+ * Missing timestamps are not filled; cumulative values are computed only for available images.
+ * @param {ee.Image} image
+ * @param {ee.List} list
+ * @returns {ee.List}
+ */
 //anomaly images are added to the list
 var accumulate = function(image,list){
   //get last image in the image collection
@@ -342,7 +341,13 @@ var accumulate = function(image,list){
   return ee.List(list).add(added);
         }
 
-// Define the calcMonthlyMean function
+/**
+ * Aggregate an ImageCollection into monthly mean images.
+ * One image is produced per year-month combination, with 'system:time_start'
+ * set to the first day of that month for charting.
+ * @param {ee.ImageCollection} imageCollection
+ * @returns {ee.ImageCollection}
+ */
 function calcMonthlyMean(imageCollection) {
   // Get the range of years within the image collection
   var yearRange = imageCollection.aggregate_array('system:time_start')
@@ -427,24 +432,23 @@ function comprobeBandsNumber(collection) {
   }).flatten();
 }
 /* ------------------------------ ANALYSIS --------------------------------- */
-/*
-function loadMetricCollection(metricKey,geometry, startDate, endDate) {
-  var metric = METRICS[metricKey];
-  return ee.ImageCollection(metric.collection)
-    .filterBounds(geometry)
-    .filterDate(startDate, endDate)
-    .select(metric.band)
-    .map(function(image) {
-      var original = image;
-
-      image = clipToGeometry(image, geometry);
-      image = applyNonWaterMask(image, geometry);
-      image = image.multiply(metric.scaleFactor).rename(metric.band);
-
-      return image.copyProperties(original, ['system:time_start']);
-    });
-}
-*/
+/**
+ * Load and preprocess a metric-specific ImageCollection for a region and period.
+ * Steps:
+ * 1. filter by bounds and date
+ * 2. derive/select the target metric band
+ * 3. clip to region
+ * 4. mask non-water pixels
+ * 5. apply scale factor
+ *
+ * Note: NDWI is derived from MODIS surface reflectance bands rather than selected directly.
+ *
+ * @param {string} metricKey - One of 'NDVI', 'LST', 'NDWI'
+ * @param {ee.Geometry|ee.FeatureCollection} geometry
+ * @param {string|ee.Date} startDate
+ * @param {string|ee.Date} endDate
+ * @returns {ee.ImageCollection}
+ */
 function loadMetricCollection(metricKey, geometry, startDate, endDate) {
   var metric = METRICS[metricKey];
   var collection = ee.ImageCollection(metric.collection)
@@ -470,6 +474,15 @@ function loadMetricCollection(metricKey, geometry, startDate, endDate) {
     return image.copyProperties(original, ['system:time_start']);
   });
 }
+/**
+ * Compute the Difference-in-Differences estimator:
+ * (afterTreatment - beforeTreatment) - (afterControl - beforeControl)
+ * @param {ee.Number} beforeTreatment
+ * @param {ee.Number} afterTreatment
+ * @param {ee.Number} beforeControl
+ * @param {ee.Number} afterControl
+ * @returns {ee.Number}
+ */
 function computeDid(beforeTreatment, afterTreatment, beforeControl, afterControl) {
   return ee.Number(afterTreatment).subtract(beforeTreatment)
     .subtract(ee.Number(afterControl).subtract(beforeControl));
@@ -482,7 +495,18 @@ function meanOverGeometry(imageCollection, bandName, geometry, scale) {
     maxPixels: 1e13, bestEffort: true
   }).get(bandName);
 }
-
+/**
+ * Compute the DiD coefficient for a selected metric using restoration and control geometries.
+ * The baseline period starts 3 years before project start and ends at project start.
+ * The intervention period runs from project start to project end.
+ * @param {string} metricKey
+ * @param {ee.Geometry} restorationGeometry
+ * @param {ee.Geometry|ee.FeatureCollection} controlGeometry
+ * @param {ee.Date|string} monitoringStart
+ * @param {ee.Date|string} startDate
+ * @param {ee.Date|string} endDate
+ * @returns {ee.Number}
+ */
 function computeDidForMetric(metricKey, restorationGeometry, controlGeometry, monitoringStart, startDate,endDate) {
   var metric = METRICS[metricKey];
   var beforeTreatment = loadMetricCollection(metricKey, restorationGeometry,monitoringStart, startDate);
@@ -500,7 +524,10 @@ function computeDidForMetric(metricKey, restorationGeometry, controlGeometry, mo
 
 
 /* ----------------------------- TIME SERIES CHARTS ----------------------- */
-
+/**
+ * Create a treatment vs control time-series chart from a combined collection.
+ * Expected input: ImageCollection with matching timestamps and a common band name.
+ */
 function createSeriesByRegionChart(comb, regions, bandName, scale, title, vAxisTitle) {
   return ui.Chart.image.seriesByRegion(
     comb,
@@ -536,7 +563,10 @@ function createSeriesByRegionChart(comb, regions, bandName, scale, title, vAxisT
     }
   });
 }
-
+/**
+ * Create a chart of restoration minus control differences through time.
+ * Expected input: an ImageCollection where each image already represents a difference.
+ */
 function createDiffChart(imageCollection, regions, scale, title, vAxisTitle, seriesProperty) {
   return ui.Chart.image.seriesByRegion({
     imageCollection: imageCollection,
@@ -562,7 +592,10 @@ function createDiffChart(imageCollection, regions, scale, title, vAxisTitle, ser
     }
   });
 }
-
+/**
+ * Create a cumulative difference chart from a precomputed cumulative ImageCollection.
+ * Expected input: a time-ordered cumulative ImageCollection with numeric 'system:time_start'.
+ */
 function createCumulativeDiffChart(imageCollection, regions, scale, title, vAxisTitle, seriesProperty) {
   return ui.Chart.image.seriesByRegion({
     imageCollection: imageCollection,
@@ -656,6 +689,12 @@ zoomButton.onClick(function(){
 /***********************************************************************************************************/
 /********************* UI - callback function to return maps charts based on user input********************/
 /*********************************************************************************************************/
+/**
+ * Main app callback.
+ * Reads the selected project, builds restoration/control areas,
+ * extracts project dates, and updates map layers and charts
+ * according to the selected indicator.
+ */
 function applyFilter(){
   
 
@@ -683,14 +722,14 @@ function applyFilter(){
   
   
   
-  //Create control area using buffer of 2km
+  // Create a first control area as a 2 km ring around the restoration geometry.
   var control_area1 =  ee.FeatureCollection(restorationGeometry.buffer(2000).difference(restorationGeometry,10))
   var dissolve = function(featureCollection) {
   var mergedGeometry = featureCollection.geometry().dissolve(1);
   return ee.FeatureCollection([ee.Feature(mergedGeometry)]);
   };
 
-  //var control_areas = control_area1
+
   
   var control1_geo =control_area1.geometry()
   //var controlareas_geo =control_areas.geometry()
@@ -718,7 +757,9 @@ function applyFilter(){
   
   // ***************************************** optional Adding one more control area using drawing tool **********************//  
 
-   // third control area based on drawing
+   // Initialize optional user-drawn control area tools.
+  // NOTE: This feature is experimental and not fully implemented.
+  // Currently, user-drawn geometries are not used in the final analysis workflow.
   // Add the drawing tools and control panel to the map
   var drawing_elements = drawingTools.initializeDrawingTools();
   var drawing_tools = drawing_elements[0];
@@ -751,8 +792,7 @@ function applyFilter(){
   /**************************************************************************************************/
   
  
-  // select date time ranges from the database
-
+  // Extract intervention start/end dates and project name from the selected feature
   var filterEndDate = ProjectBoundary.map(function(feature) {
     // Check for the existence of both 'Project_En' and 'Project En'
     var projectEn = feature.get('Project_En');
@@ -805,8 +845,12 @@ function applyFilter(){
 
 
 /* --------------------------- CONTROL AREAS ------------------------------- */
-  // Function to create a random polygon around a reference polygon
+  // Build a second control area by searching for a nearby polygon of similar size
+  // and broadly comparable land-cover composition.
   function createRandomPolygon(referenceFeature, maxAttempts) {
+    
+    // Compare restoration and candidate polygons using land-cover composition
+    // to avoid selecting a random control with very different surface characteristics.
     
     // Get the geometry of the reference polygon
     var referenceGeometry = referenceFeature.geometry();
@@ -889,6 +933,9 @@ function applyFilter(){
     var attempt = 0;
     var randomPolygon = null;
     
+    // Accept the candidate only if it does not overlap the restoration area
+   // or the buffer control and meets similarity thresholds.
+    
     while (attempt < maxAttempts) {
       attempt += 1;
       
@@ -908,8 +955,7 @@ function applyFilter(){
       
       //ensure doesnt overlap with other control areas
       var overlap2 = candidatePolygon.intersects(control1_geo, ee.ErrorMargin(1));
-          // overlap with bufferwithout polygon
-      //var overlap3 = candidatePolygon.intersects(bufferWithoutPolygon, ee.ErrorMargin(1));
+      
       var distanceToReference = candidatePolygon.distance(referenceGeometry);
 
           // Get the land cover type of the candidate polygon
@@ -1044,12 +1090,12 @@ function applyFilter(){
       //var withinBuffer = candidatePolygon.intersects(bufferWithoutPolygon, ee.ErrorMargin(1));
       
       // Debugging outputs
-      print('Candidate Polygon Area (sq meters):', candidatePolygon.area());
-      print('Overlaps with Reference:', overlap.getInfo());
-      print('overlaps with Buffer:', overlap2.getInfo());
-      print('Distance to Reference (meters):', distanceToReference.getInfo())
+      //print('Candidate Polygon Area (sq meters):', candidatePolygon.area());
+      //print('Overlaps with Reference:', overlap.getInfo());
+      //print('overlaps with Buffer:', overlap2.getInfo());
+      //print('Distance to Reference (meters):', distanceToReference.getInfo())
       
-      // Calculate dot product of referenceProportions and candidateProportions
+      // Calculate dot product of referenceProportions and candidateProportions (cosine similarity)
       var dotProduct = restorationPercentages.keys().map(function(key) {
           var refValue = ee.Number(restorationPercentages.get(key, 0)); // Default to 0 if key is missing
           var candValue = ee.Number(controlPercentages.get(key, 0)); // Default to 0 if key is missing
@@ -1135,7 +1181,7 @@ function applyFilter(){
   var mergedControlAreas = control_area1.merge(control_area2);
   var control_areas_ = mergedControlAreas.union(ee.ErrorMargin(1));//ee.FeatureCollection(dissolve(mergedControlAreas)).geometry();
 
-  
+  /*
   Export.table.toDrive({
   collection: control_areas_,
   description:'control_area_Ghana',
@@ -1144,7 +1190,7 @@ function applyFilter(){
   Export.table.toDrive({
   collection: selectedFeature,
   description:'restoration_area_Ghana',
-  fileFormat: 'SHP'});
+  fileFormat: 'SHP'}); */
 
   var control_area_lr2 = ui.Map.Layer(control_area2,{color: 'f58c75'},'Control area 2 ');
   var control_areas_lr = ui.Map.Layer(control_areas_, {color: 'FF0000'}, ' Control area 1 + Control area 2');
@@ -1194,7 +1240,13 @@ function applyFilter(){
         
       if (selectedPlot === 'Normalized Difference Vegetation Index') {
        
-                       
+        // NDVI branch:
+        // 1. load restoration and control collections
+        // 2. compute DiD coefficient
+        // 3. build monthly means
+        // 4. derive restoration-control difference series
+        // 5. accumulate differences through time
+        // 6. render map layers and charts               
         var metric = METRICS['NDVI']
         var restorationTs =loadMetricCollection('NDVI', restorationGeometry, monitoring_start, project_end);
         var controlTs = loadMetricCollection('NDVI', control_areas_, monitoring_start, project_end);
@@ -1320,6 +1372,10 @@ function applyFilter(){
                                                
                                                 
     } else if(selectedPlot === 'Land Surface Temperature'){
+      
+      // LST branch:
+      // Uses scaled MODIS LST (Kelvin) to compare restoration and control thermal dynamics.
+      // Difference images must be centered near zero before cumulative sums are interpreted.
 
       var restorationTs =loadMetricCollection('LST', restorationGeometry, monitoring_start, project_end);
       var controlTs = loadMetricCollection('LST', control_areas_, monitoring_start, project_end);
@@ -1393,7 +1449,7 @@ function applyFilter(){
       var firstlst =  ee.List([ee.Image(0).set('system:time_start', timelst).select([0],['LST_Day_1km'])]);
         
       var cumulativeLST = ee.ImageCollection(ee.List(LST_DIFF.iterate(accumulate,firstlst)))
-        
+      print(cumulativeLST,'cumulativeLST')
       var comblst = controlTsMeanCollection.combine(restorationTsMeanCollection)
          // Define the regions, including restoration and control areas
       var regions = ee.FeatureCollection(ProjectBoundary.merge(control_areas_));
@@ -1436,9 +1492,11 @@ function applyFilter(){
     
     } else if(selectedPlot === 'Normalized Difference Water Index'){
 
-       // 3. MODIS NDWI
+ 
 
-      
+      // NDWI branch:
+      // NDWI is derived from MODIS surface reflectance and used to compare water-related
+      // vegetation/moisture differences between restoration and control areas.
       var restorationTs = loadMetricCollection('NDWI', restorationGeometry, monitoring_start, project_end);
       var controlTs = loadMetricCollection('NDWI', control_areas_, monitoring_start, project_end);
       
