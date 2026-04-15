@@ -143,6 +143,19 @@ var chartdetailndwi2 = ui.Label('•	The NDWI for the control area is displayed 
 var chartdetailPanelndwiDiff = ui.Label('The "NDWI Difference (Restoration area - Control area)" chart illustrates the difference in NDWI between the restoration and control areas over time. This highlights changes in water content in vegetation.' ,{fontSize: '14px'})
 var chartdetailPanelndwiCumDiff = ui.Label('The "Cumulative NDWI Difference (Restoration area - control area)" chart tracks the cumulative difference in NDWI over time, providing insights into the long-term impact of restoration activities.' ,{fontSize: '14px'} )
 var panelndviDID = ui.Panel({style: { width: '300px', position: 'top-right', padding: '8px' }});
+// Title (only once)
+var didTitle = ui.Label({
+  value: 'Difference-in-Differences Coefficients',
+  style: { fontWeight: 'bold', fontSize: '16px' }
+});
+
+// Value placeholders
+var ndviLabel = ui.Label('NDVI: -');
+var lstLabel = ui.Label('LST: -');
+var ndwiLabel = ui.Label('NDWI: -');
+
+// Add them once
+panelndviDID.add(didTitle);
 
 var plotsDD = ui.Select([], 'Loading .....');
 var plots = {};
@@ -167,7 +180,7 @@ var referenceTwo = ui.Label({
         },
         targetUrl: 'https://www.frontiersin.org/journals/environmental-science/articles/10.3389/fenvs.2024.1352058/full'
     });
-var classification_names = ['Restoration area', 'Contol area 1','Control area 2' ]       
+var classification_names = ['Restoration area', 'Contol area 1: 2 km buffer','Control area 2: Randomly selected' ]       
  
 var classification_palette = [
   "6BFF33", // 1.restoration area
@@ -331,6 +344,7 @@ function parseDate(dateString) {
  * @returns {ee.List}
  */
 //anomaly images are added to the list
+/*
 var accumulate = function(image,list){
   //get last image in the image collection
   var previous = ee.Image(ee.List(list).get(-1));
@@ -339,7 +353,27 @@ var accumulate = function(image,list){
                           .set('system:time_start',image.get('system:time_start'));
   //return list with cumulative anomaly inserted
   return ee.List(list).add(added);
-        }
+        }*/
+  // updated due to LST missing bands
+  var accumulate = function(image, list) {
+  image = ee.Image(image);
+
+  // Ensure both images are valid (no mask propagation issues)
+  var current = image.unmask(0);
+  var previous = ee.Image(ee.List(list).get(-1)).unmask(0);
+
+  // Preserve timestamp as millis (critical for charts)
+  var ts = ee.Number(image.get('system:time_start'));
+
+  // Preserve band name dynamically
+  var bandNames = current.bandNames();
+
+  var added = previous.add(current)
+    .rename(bandNames)
+    .set('system:time_start', ts);
+
+  return ee.List(list).add(added);
+};
 
 /**
  * Aggregate an ImageCollection into monthly mean images.
@@ -768,10 +802,10 @@ function applyFilter(){
   //var control_area3 = drawing_tools.layers().get(0).getEeObject();
  
   //print(control_area3)
-  var control_area_lr1 = ui.Map.Layer(control1_geo, {color: 'FF0000'}, ' Control area - 1');
+  var control_area_lr1 = ui.Map.Layer(control1_geo, {color: 'FF0000'}, ' Control area - 1:2 km buffer');
 
   
-  var restoration_arealyr = ui.Map.Layer(restorationGeometry, {color: '6BFF33'}, adm0_name + ' Boundaries');
+  var restoration_arealyr = ui.Map.Layer(restorationGeometry, {color: '6BFF33'}, 'Restoration area'/*adm0_name + ' Boundaries'*/);
 
   Map.add(restoration_arealyr);
   Map.add(control_area_lr1)
@@ -1176,8 +1210,71 @@ function applyFilter(){
   // Call the function with a limit of 20 attempts
   var control_area2 = createRandomPolygon(ee.Feature(restorationGeometry), 20);
     
+  if (control_area2 === null) {
+  projectdetailP.clear();
+  projectdetailP.add(ui.Label({
+    value: '⚠️ No valid control polygon found after 20 attempts.\n' +
+           'You can try again with the same restoration area or select a different one.',
+    style: {color: 'red', fontWeight: 'bold'}
+  }));
+  return;
+}
+   
+    var empty = ee.Image().byte();
+    
+    var restorationFill = empty.paint(restorationGeometry, 1).visualize({
+      palette: ['6BFF33'],
+      opacity: 0.70
+    });
+    
+    var control1Fill = empty.paint(control1_geo, 1).visualize({
+      palette: ['FF0000'],
+      opacity: 0.70
+    });
+    
+    var control2Fill = empty.paint(control_area2, 1).visualize({
+      palette: ['f58c75'],
+      opacity: 0.70
+    });
+  // Optional outline layers
+    var restoration_arealyr = ui.Map.Layer(
+      restorationGeometry,
+      {color: '00AA00'},
+      'Restoration area'
+    );
+    
+    var control_area_lr1 = ui.Map.Layer(
+      control1_geo,
+      {color: 'AA0000'},
+      'Control area 1: 2 km buffer'
+    );
+    
 
- 
+    
+    var control_area_lr2 = ui.Map.Layer(
+      control_area2,
+      {color: 'f58c75'},
+      'Control area 2: Randomly selected'
+    );
+    
+
+  // ----------------------------------------
+  // INITIAL MAP DISPLAY
+  // ----------------------------------------
+  Map.clear();
+  Map.add(legend)
+  Map.addLayer(restorationFill, {}, 'Restoration area');
+  Map.addLayer(control1Fill, {}, 'Control area 1: 2 km buffer');
+  Map.addLayer(control2Fill, {}, 'Control area 2: Randomly selected');
+  
+  //Map.add(restoration_arealyr);
+  //Map.add(control_area_lr1);
+  //Map.add(control_area_lr2);
+  
+  // ----------------------------------------
+  // UPDATE PROJECT DETAILS PANEL
+  // ----------------------------------------
+  projectdetailP.clear();
   var mergedControlAreas = control_area1.merge(control_area2);
   var control_areas_ = mergedControlAreas.union(ee.ErrorMargin(1));//ee.FeatureCollection(dissolve(mergedControlAreas)).geometry();
 
@@ -1192,9 +1289,9 @@ function applyFilter(){
   description:'restoration_area_Ghana',
   fileFormat: 'SHP'}); */
 
-  var control_area_lr2 = ui.Map.Layer(control_area2,{color: 'f58c75'},'Control area 2 ');
-  var control_areas_lr = ui.Map.Layer(control_areas_, {color: 'FF0000'}, ' Control area 1 + Control area 2');
-  Map.add(control_area_lr2)
+  var control_area_lr2 = ui.Map.Layer(control_area2,{color: 'f58c75'},'Control area 2:Randomly selected');
+  var control_areas_lr = ui.Map.Layer(control_areas_, {color: 'FF0000'}, ' Control area 1 + Control area 2',false);
+  //Map.add(control_area_lr2)
   
   /******************************* UI- DISPLAY PROJECT DETAILS *****************************************************/
     // Convert server-side array to client-side
@@ -1226,7 +1323,7 @@ function applyFilter(){
       Map.add(restoration_arealyr);
       Map.add(control_area_lr1)
       Map.add(control_area_lr2)
-      Map.add(control_areas_lr)
+      //Map.add(control_areas_lr)
       var chartPanel = ui.Panel();
       panel.widgets().add(chartPanel)
 
@@ -1253,11 +1350,12 @@ function applyFilter(){
         
         
         var didCoefficient = computeDidForMetric('NDVI', restorationGeometry, control_areas_, monitoring_start, project_start, project_end);
-      
+        /*
+        panelndviDID.clear();
         panelndviDID.add(ui.Label({
           value: 'Difference-in-Differences Coefficient',
           style: { fontWeight: 'bold', fontSize: '16px' }
-        }));
+        }));*/
         // Evaluate the DiD coefficient
         didCoefficient.evaluate(function(didValue){ 
           // Add the evaluated value to the panel
@@ -1265,9 +1363,9 @@ function applyFilter(){
           //print('Difference-in-Differences Coefficient for NDVI: ', didValue);
         });
 
-        var NDVI_layer1 = ui.Map.Layer(controlTs.first(),METRICS.NDVI.viz,'MODIS NDVI restoration area' );
+        var NDVI_layer1 = ui.Map.Layer(controlTs.first(),METRICS.NDVI.viz,'MODIS NDVI control area' );
                     
-        var NDVI_layer2 = ui.Map.Layer(restorationTs.first(),METRICS.NDVI.viz,'MODIS NDVI control area');
+        var NDVI_layer2 = ui.Map.Layer(restorationTs.first(),METRICS.NDVI.viz,'MODIS NDVI restoration area');
         
        
         //Calculate monthly average NDVI
@@ -1352,9 +1450,24 @@ function applyFilter(){
           );
      
         
-        Map.add(legend);
+        Map.clear()
+        
         Map.add(NDVI_layer1)
         Map.add(NDVI_layer2)
+        
+        // 👇 ADD NDVI LEGEND (continuous)
+        var ndviLegend = populateLegend('NDVI',METRICS.NDVI.viz,'','',{});
+
+        Map.add(ndviLegend);
+        // 2. optional light fills
+        //Map.addLayer(restorationFill, {}, 'Restoration area', true, 0.50);
+        //Map.addLayer(control1Fill, {}, 'Control area 1: 2 km buffer', true, 0.50);
+        //Map.addLayer(control2Fill, {}, 'Control area 2: Randomly selected', true, 0.50);
+        
+        // 3. boundaries last so they stay visible
+        //Map.addLayer(restorationGeometry, {color: '00FF00'}, 'Restoration boundary');
+        //Map.addLayer(control1_geo, {color: 'FF0000'}, 'Control 1 boundary');
+        //Map.addLayer(control_area2, {color: '0000FF'}, 'Control 2 boundary');
           
 
         chartPanel.clear()
@@ -1382,7 +1495,7 @@ function applyFilter(){
         
         
       var didCoefficient = computeDidForMetric('LST', restorationGeometry, control_areas_, monitoring_start, project_start, project_end);
-     
+      //panelndviDID.clear();
       // Evaluate the DiD coefficient
       didCoefficient.evaluate(function(didValue) {
         // Add the evaluated value to the panel
@@ -1391,11 +1504,11 @@ function applyFilter(){
       });
       
       //display LST maps                                    
-      var LST_layer1 = ui.Map.Layer(restorationTs.first(),
+      var LST_layer1 = ui.Map.Layer(restorationTs.median(),
                                        METRICS.LST.viz,
                                        'MODIS LST restoration area'
                                        );
-      var LST_layer2 = ui.Map.Layer(controlTs.first(),
+      var LST_layer2 = ui.Map.Layer(controlTs.median(),
                                        METRICS.LST.viz,
                                        'MODIS LST control area'
                                        );
@@ -1447,7 +1560,7 @@ function applyFilter(){
       //the first anomaly in the list is just 0
         
       var firstlst =  ee.List([ee.Image(0).set('system:time_start', timelst).select([0],['LST_Day_1km'])]);
-        
+  
       var cumulativeLST = ee.ImageCollection(ee.List(LST_DIFF.iterate(accumulate,firstlst)))
       print(cumulativeLST,'cumulativeLST')
       var comblst = controlTsMeanCollection.combine(restorationTsMeanCollection)
@@ -1472,10 +1585,13 @@ function applyFilter(){
           'Cumulative LST difference',
           'PROJECT'
         );
-      
+      Map.clear()
       Map.add(LST_layer1)
       Map.add(LST_layer2)
-      Map.add(legend);
+      //Map.add(legend);
+      var lstLegend = populateLegend('LST (K)',METRICS.LST.viz,'','',{});
+      
+      Map.add(lstLegend);
 
       chartPanel.clear();
       chartPanel.add(chartdetailPanelst);
@@ -1503,7 +1619,7 @@ function applyFilter(){
       var didCoefficient = computeDidForMetric('NDWI',restorationGeometry,control_areas_,monitoring_start,project_start,
         project_end
       );
-    
+      //panelndviDID.clear();
       // Evaluate the DiD coefficient
       didCoefficient.evaluate(function(didValue) {
         // Add the evaluated value to the panel
@@ -1586,15 +1702,19 @@ function applyFilter(){
           'Cumulative NDWI difference',
           'PROJECT'
         );
+      Map.clear()
       Map.add(NDWI_layer1)
       Map.add(NDWI_layer2)
+      var ndwiLegend = populateLegend('NDWI',METRICS.NDWI.viz, '','',{});
+
+      Map.add(ndwiLegend);
 
       chartPanel.clear()
       chartPanel.add(chartdetailPanelndwi)
       chartPanel.add(chartdetailndwi1)
       chartPanel.add(chartdetailndwi2)
       chartPanel.add(plotNDWI)
-      Map.add(legend);
+      
 
       chartPanel.add(chartdetailPanelndwiDiff);
       chartPanel.add(NDWI_Diff_Chart);
@@ -1630,7 +1750,3 @@ var mainPanel = ui.Panel({
   layout: ui.Panel.Layout.flow('horizontal'),  // Horizontal layout
   style: {stretch: 'both'}  // Make it take up the full space
 });
-
-
-
-
