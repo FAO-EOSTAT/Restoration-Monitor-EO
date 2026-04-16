@@ -465,6 +465,39 @@ function comprobeBandsNumber(collection) {
     return new_list;
   }).flatten();
 }
+
+function updateDidLabel(metricName, didValue, didRequestId) {
+  if (didRequestId !== currentDidRequest) return;
+
+  var text = metricName + ': ' + didValue.toFixed(4);
+
+  if (metricName === 'NDVI') {
+    if (ndviDidLabel === null) {
+      ndviDidLabel = ui.Label(text);
+      panelndviDID.add(ndviDidLabel);
+    } else {
+      ndviDidLabel.setValue(text);
+    }
+  }
+
+  if (metricName === 'LST') {
+    if (lstDidLabel === null) {
+      lstDidLabel = ui.Label(text);
+      panelndviDID.add(lstDidLabel);
+    } else {
+      lstDidLabel.setValue(text);
+    }
+  }
+
+  if (metricName === 'NDWI') {
+    if (ndwiDidLabel === null) {
+      ndwiDidLabel = ui.Label(text);
+      panelndviDID.add(ndwiDidLabel);
+    } else {
+      ndwiDidLabel.setValue(text);
+    }
+  }
+}
 /* ------------------------------ ANALYSIS --------------------------------- */
 /**
  * Load and preprocess a metric-specific ImageCollection for a region and period.
@@ -645,6 +678,7 @@ function createCumulativeDiffChart(imageCollection, regions, scale, title, vAxis
     vAxis: {title: vAxisTitle}
   });
 }
+
 //**************************************** UI- POPULATE DD ***************************************************//
 
 var mapPanel = ui.Map();
@@ -719,7 +753,22 @@ zoomButton.onClick(function(){
 }); 
 
 
+function getBaseSeed(projectId) {
+  var s = String(projectId);
+  var hash = 0;
+  for (var i = 0; i < s.length; i++) {
+    hash = ((hash << 5) - hash) + s.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash) + 1000;
+}
 
+//globals
+var currentProjectRequest = 0;
+var currentDidRequest = 0; 
+var ndviDidLabel = null;
+var lstDidLabel = null;
+var ndwiDidLabel = null;
 /***********************************************************************************************************/
 /********************* UI - callback function to return maps charts based on user input********************/
 /*********************************************************************************************************/
@@ -731,7 +780,28 @@ zoomButton.onClick(function(){
  */
 function applyFilter(){
   
+  currentProjectRequest += 1;
+  var projectRequestId = currentProjectRequest;
 
+  currentDidRequest += 1;   // invalidate old coefficient callbacks too
+  projectdetailP.clear();
+  projectdetailP.add(ui.Label({
+    value: 'Generating control areas. This may take a moment for large project areas.',
+    style: {color: 'gray', fontWeight: 'bold'}
+  }));
+  
+  //projectdetailP.clear();
+  panelndviDID.clear();
+  
+  panelndviDID.add(ui.Label({
+    value: 'Difference-in-Differences Coefficients',
+    style: { fontWeight: 'bold', fontSize: '16px' }
+  }));
+
+  ndviDidLabel = null;
+  lstDidLabel = null;
+  ndwiDidLabel = null;
+  
   // Assign the widget values to variables
   var adm1_name = statesDD.getValue();
   var adm0_name = CountryDD.getValue();
@@ -881,7 +951,7 @@ function applyFilter(){
 /* --------------------------- CONTROL AREAS ------------------------------- */
   // Build a second control area by searching for a nearby polygon of similar size
   // and broadly comparable land-cover composition.
-  function createRandomPolygon(referenceFeature, maxAttempts) {
+  function createRandomPolygon(referenceFeature, maxAttempts,seed) {
     
     // Compare restoration and candidate polygons using land-cover composition
     // to avoid selecting a random control with very different surface characteristics.
@@ -955,14 +1025,20 @@ function applyFilter(){
     var minY = ee.Number(ee.List(boundsList.get(0)).get(1));
     var maxX = ee.Number(ee.List(boundsList.get(2)).get(0));
     var maxY = ee.Number(ee.List(ee.List(boundsList.get(2)).get(1))); // Fixed index for Y
-    
+    /*
     // Function to generate a random point within the bounds
     function generateRandomPoint() {
       var xRandom = minX.add(ee.Number(Math.random()).multiply(maxX.subtract(minX)));
       var yRandom = minY.add(ee.Number(Math.random()).multiply(maxY.subtract(minY)));
       return ee.Geometry.Point([xRandom, yRandom]);
-    }
+    }*/
     
+    var candidatePoints = ee.FeatureCollection.randomPoints({
+      region: bufferWithoutPolygon,
+      points: maxAttempts,
+      seed: seed,
+      maxError: 1
+    }).toList(maxAttempts);
     // Try generating a random polygon with the same area as the reference polygon
     var attempt = 0;
     var randomPolygon = null;
@@ -974,7 +1050,8 @@ function applyFilter(){
       attempt += 1;
       
       // Generate a random point
-      var randomPoint = generateRandomPoint();
+      //var randomPoint = generateRandomPoint();
+      var randomPoint = ee.Feature(candidatePoints.get(attempt - 1)).geometry();
       
       // Calculate the radius needed to match the reference polygon area
       var targetRadius = ee.Number(referenceArea.divide(Math.PI).sqrt()); // Use ee.Number directly
@@ -1208,9 +1285,14 @@ function applyFilter(){
 
   // Apply the function to each feature in the collection
   // Call the function with a limit of 20 attempts
-  var control_area2 = createRandomPolygon(ee.Feature(restorationGeometry), 20);
+  //var control_area2 = createRandomPolygon(ee.Feature(restorationGeometry), 20);
+  var projectId = adm0_name;
+  var seed = getBaseSeed(projectId);
+  var control_area2 = createRandomPolygon(ee.Feature(restorationGeometry),CONFIG.randomControlAttempts,seed);
     
   if (control_area2 === null) {
+  var requestId = currentDidRequest;
+  if (requestId !== currentProjectRequest) return;
   projectdetailP.clear();
   projectdetailP.add(ui.Label({
     value: '⚠️ No valid control polygon found after 20 attempts.\n' +
@@ -1296,14 +1378,22 @@ function applyFilter(){
   /******************************* UI- DISPLAY PROJECT DETAILS *****************************************************/
     // Convert server-side array to client-side
   projectNames.evaluate(function(names) {
+      var requestId = currentDidRequest;
+      if (requestId !== currentProjectRequest) return;
+
+      projectdetailP.clear();
       projectdetailP.add(ui.Label('The selected project is called: '+names[0]+' which started on ' + startDatesList_[0].getInfo()+' and ends on '+endDatesList_[0].getInfo(),{fontSize: '14px'}));
       //panel.widgets(6).add(projectdetailP)
+      projectdetailP.add(ui.Label({
+      value: 'Map guide: the randomly selected control area is shown in pink.',
+      style: {fontSize: '13px', color: 'blue', fontWeight: 'bold'}
+      }));
     
     });
   
   plotsDD.items().reset(['Normalized Difference Vegetation Index', 'Land Surface Temperature', 'Normalized Difference Water Index'
     ]);
-    
+  plotsDD.setValue(null, false);  
   plotsDD.setPlaceholder('Choose Resilence Indicator');
   
   //Map.add(restoration_arealyr);
@@ -1356,11 +1446,17 @@ function applyFilter(){
           value: 'Difference-in-Differences Coefficient',
           style: { fontWeight: 'bold', fontSize: '16px' }
         }));*/
+        /*
         // Evaluate the DiD coefficient
         didCoefficient.evaluate(function(didValue){ 
           // Add the evaluated value to the panel
           panelndviDID.add(ui.Label('NDVI :' + didValue.toFixed(4)));
           //print('Difference-in-Differences Coefficient for NDVI: ', didValue);
+        });
+        */
+        didCoefficient.evaluate(function(didValue) {
+          var didRequestId = currentDidRequest;
+          updateDidLabel('NDVI', didValue, didRequestId);
         });
 
         var NDVI_layer1 = ui.Map.Layer(controlTs.first(),METRICS.NDVI.viz,'MODIS NDVI control area' );
@@ -1496,11 +1592,17 @@ function applyFilter(){
         
       var didCoefficient = computeDidForMetric('LST', restorationGeometry, control_areas_, monitoring_start, project_start, project_end);
       //panelndviDID.clear();
+      /*
       // Evaluate the DiD coefficient
       didCoefficient.evaluate(function(didValue) {
         // Add the evaluated value to the panel
         panelndviDID.add(ui.Label('LST :'+didValue.toFixed(4)));
         //print('Difference-in-Differences Coefficient for LST: ', didValue);
+      });*/
+      
+      didCoefficient.evaluate(function(didValue) {
+        var didRequestId = currentDidRequest;
+        updateDidLabel('LST', didValue, didRequestId);
       });
       
       //display LST maps                                    
@@ -1620,12 +1722,17 @@ function applyFilter(){
         project_end
       );
       //panelndviDID.clear();
+      /*
       // Evaluate the DiD coefficient
       didCoefficient.evaluate(function(didValue) {
         // Add the evaluated value to the panel
         panelndviDID.add(ui.Label('NDWI :'+ didValue.toFixed(4)));
         
-      });
+      });*/
+      didCoefficient.evaluate(function(didValue) {
+          var didRequestId = currentDidRequest;
+          updateDidLabel('NDWI', didValue, didRequestId);
+        });
       
       
       //display NDWI maps                                    
